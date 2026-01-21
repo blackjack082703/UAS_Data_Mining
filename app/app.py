@@ -17,64 +17,77 @@ sys.path.append(root_dir)
 st.set_page_config(page_title="Churn AI Ensemble Predictor", layout="wide")
 
 # ==========================================
-# 1. FUNGSI LOADER YANG ROBUST (SELF-HEALING)
+# 1. FUNGSI LOADER (DIPISAH AGAR CACHE AMAN)
 # ==========================================
+
+# BAGIAN A: Fungsi Murni (Hanya Load Data/Model) -> BOLEH DI-CACHE
+# Syarat: Tidak boleh ada st.write, st.spinner, st.toast di sini.
 @st.cache_resource
-def load_assets():
-    """
-    Memuat model dan data. 
-    Jika model rusak/beda versi/tidak ada, otomatis jalankan training ulang.
-    """
+def get_model_from_disk():
     model_path = os.path.join(root_dir, 'models/ensemble_model.pkl')
+    # Jika file tidak ada atau rusak, biarkan error-nya melempar ke wrapper
+    return joblib.load(model_path)
+
+@st.cache_resource
+def get_data_from_disk():
     data_path = os.path.join(root_dir, 'data/preprocess/dataset_cleaned.csv')
+    return pd.read_csv(data_path) if os.path.exists(data_path) else pd.DataFrame()
+
+# BAGIAN B: Fungsi Wrapper (Logic & UI) -> TIDAK DI-CACHE
+# Fungsi ini menangani error handling, retraining, dan notifikasi UI.
+def load_assets_safe():
+    model_path = os.path.join(root_dir, 'models/ensemble_model.pkl')
     
-    model_ens = None
-    
-    # Fungsi internal untuk training ulang
+    # Logic Training Ulang (Internal Function)
     def retrain_model():
-        with st.spinner("🔄 Mendeteksi perubahan versi atau model hilang. Melatih ulang model..."):
+        with st.spinner("🔄 Mendeteksi model usang/hilang. Melatih ulang otomatis..."):
             try:
+                # PENTING: Clear cache agar model rusak tidak tersimpan di memori
+                st.cache_resource.clear()
+                
                 from src.modeling import run_modeling_pipeline
-                # Pastikan kita di root dir saat menjalankan script modeling agar path relative aman
                 original_cwd = os.getcwd()
                 os.chdir(root_dir) 
                 run_modeling_pipeline()
-                os.chdir(original_cwd) # Kembalikan ke dir asal
+                os.chdir(original_cwd)
                 st.toast("✅ Model berhasil diperbarui!", icon="🎉")
             except Exception as e:
                 st.error(f"FATAL: Gagal melatih ulang model. Cek src/modeling.py. Error: {e}")
                 st.stop()
 
-    # LOGIKA UTAMA: Try Load -> Except -> Retrain -> Load Again
+    model_ens = None
+    
+    # 1. Coba Load Model
     try:
         if not os.path.exists(model_path):
             raise FileNotFoundError("File model belum ada.")
         
-        # Coba load model
-        model_ens = joblib.load(model_path)
+        # Panggil fungsi cached
+        model_ens = get_model_from_disk()
         
     except (FileNotFoundError, AttributeError, ImportError, Exception) as e:
-        # GANTI st.warning DENGAN INI:
-        print(f"⚠️ [LOG SYSTEM] Model usang terdeteksi ({e}). Memulai retraining...") 
-        st.toast("⚙️ Memperbarui kompatibilitas sistem...", icon="🔄") # Notifikasi halus
+        # 2. Jika Gagal (Error Versi/File Hilang), Handle di sini
+        # Pesan UI aman ditaruh di sini karena fungsi ini TIDAK di-cache
+        print(f"⚠️ [LOG SYSTEM] Error Loading Model: {e}")
+        st.toast(f"⚠️ Memperbaiki sistem: {str(e)[:50]}...", icon="🛠️")
         
         # Hapus file lama jika ada
         if os.path.exists(model_path):
             os.remove(model_path)
             
-        # Latih ulang
+        # Jalankan Training Ulang
         retrain_model()
         
-        # Load kembali
-        model_ens = joblib.load(model_path)
+        # Coba Load Lagi (Sekarang harusnya berhasil)
+        model_ens = get_model_from_disk()
 
-    # Load dataset untuk EDA
-    df_raw = pd.read_csv(data_path) if os.path.exists(data_path) else pd.DataFrame()
+    # 3. Load Data (Aman karena fungsi get_data_from_disk di-cache terpisah)
+    df_raw = get_data_from_disk()
     
     return model_ens, df_raw
 
-# Memuat Resource (Hanya memanggil fungsi ini, logika try-except sudah di dalam)
-model, df_raw = load_assets()
+# Panggil fungsi wrapper (Bukan fungsi yang ada @st.cache_resource)
+model, df_raw = load_assets_safe()
 
 # ==========================================
 # 2. NAVIGASI SIDEBAR
